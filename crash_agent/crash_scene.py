@@ -27,7 +27,7 @@ PRE_IMPACT = 4            # slow motion starts this many frames before impact
 PAINTS = [
     (0.80, 0.05, 0.04), (0.98, 0.70, 0.02), (0.05, 0.25, 0.85), (0.95, 0.35, 0.02),
     (0.10, 0.55, 0.15), (0.92, 0.92, 0.92), (0.45, 0.10, 0.65), (0.02, 0.60, 0.70),
-    (0.08, 0.08, 0.09), (0.85, 0.15, 0.45),
+    (0.55, 0.55, 0.58), (0.85, 0.15, 0.45),
 ]
 
 STYLES = {
@@ -90,7 +90,7 @@ class Builder:
         self.mats = {}
 
     # --- meshes
-    def box(self, name, size, loc, mats, mat_fn=None, bevel=0.0, extra=None, taper_top=1.0, rot=(0, 0, 0)):
+    def box(self, name, size, loc, mats, mat_fn=None, bevel=0.0, extra=None, taper_top=1.0, rot=(0, 0, 0), smooth=False):
         me = bpy.data.meshes.new(name)
         bm = bmesh.new()
         bmesh.ops.create_cube(bm, size=1.0)
@@ -120,8 +120,15 @@ class Builder:
         if bevel > 0:
             mod = ob.modifiers.new("bevel", "BEVEL")
             mod.width = bevel
-            mod.segments = 2
+            mod.segments = 4 if smooth else 2
             mod.limit_method = "ANGLE"
+            if smooth:
+                for p in me.polygons:
+                    p.use_smooth = True
+                try:
+                    mod.harden_normals = True
+                except Exception:
+                    pass
         return ob
 
     def cylinder(self, name, r, depth, loc, mats, rot=(math.pi / 2, 0, 0), segs=28, cap_mat=1):
@@ -322,16 +329,31 @@ def build_car(B, style_name, paint, origin, yaw=0.0, speed=20.0, breakable=True,
     top = clear + H
     parts = []
 
-    lights = [
-        ((L / 2 - 0.02, W / 2 - 0.35, H / 2 - 0.15), (0.06, 0.38, 0.14), 1),
-        ((L / 2 - 0.02, -(W / 2 - 0.35), H / 2 - 0.15), (0.06, 0.38, 0.14), 1),
-        ((-L / 2 + 0.02, W / 2 - 0.3, H / 2 - 0.15), (0.06, 0.35, 0.12), 2),
-        ((-L / 2 + 0.02, -(W / 2 - 0.3), H / 2 - 0.15), (0.06, 0.35, 0.12), 2),
+    m_plate = mat_basic(f"plate{tag}", (0.9, 0.9, 0.85), rough=0.4)
+    zl = H / 2 - 0.16
+    details = [
+        # headlights (1) and tail lights (2)
+        ((L / 2 - 0.03, W / 2 - 0.33, zl), (0.08, 0.40, 0.15), 1),
+        ((L / 2 - 0.03, -(W / 2 - 0.33), zl), (0.08, 0.40, 0.15), 1),
+        ((-L / 2 + 0.03, W / 2 - 0.30, zl), (0.08, 0.36, 0.13), 2),
+        ((-L / 2 + 0.03, -(W / 2 - 0.30), zl), (0.08, 0.36, 0.13), 2),
+        # grille (3) and number plates (4)
+        ((L / 2 - 0.02, 0, zl - 0.02), (0.06, W * 0.36, H * 0.32), 3),
+        ((L / 2 + 0.01, 0, -H / 2 + 0.16), (0.03, 0.52, 0.12), 4),
+        ((-L / 2 - 0.01, 0, -H / 2 + 0.2), (0.03, 0.52, 0.12), 4),
     ]
-    ch = B.box(f"Chassis{tag}", (L, W, H), (0, 0, cz), [m_paint, m_head, m_tail], extra=lights, bevel=0.06)
+    # dark wheel arches on both sides
+    for wx in (s["WX"], -s["WX"]):
+        for sy in (1, -1):
+            details.append(((wx, sy * (W / 2 - 0.01), -H / 2 + 0.12), (2 * R + 0.16, 0.04, R * 0.75), 3))
+    ch = B.box(f"Chassis{tag}", (L, W, H), (0, 0, cz), [m_paint, m_head, m_tail, m_dark, m_plate],
+               extra=details, bevel=0.12, smooth=True)
     B.rb(ch, mass=s["mass"], fric=0.5)
-    cab = B.box(f"Cabin{tag}", (s["cabL"], W * 0.88, s["cabH"]), (s["cabX"], 0, top + s["cabH"] / 2 + 0.02),
-                [m_paint, m_glass], mat_fn=lambda n: 0 if n.z > 0.9 else 1, bevel=0.07, taper_top=0.78)
+    cw = W * 0.88
+    mirrors = [((s["cabL"] / 2 - 0.15, sy * (cw / 2 + 0.08), -s["cabH"] / 2 + 0.12), (0.12, 0.16, 0.10), 0) for sy in (1, -1)]
+    cab = B.box(f"Cabin{tag}", (s["cabL"], cw, s["cabH"]), (s["cabX"], 0, top + s["cabH"] / 2 + 0.02),
+                [m_paint, m_glass], mat_fn=lambda n: 0 if n.z > 0.9 else 1, bevel=0.10, taper_top=0.74,
+                extra=mirrors, smooth=True)
     B.rb(cab, mass=150 * k, fric=0.5)
     parts.append(cab)
     hood_len = max(0.6, (L / 2) - (s["cabX"] + s["cabL"] / 2) - 0.12)
