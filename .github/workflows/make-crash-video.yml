@@ -1,0 +1,145 @@
+name: Make Bipnik Crash Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "Obstacle (random = surprise)"
+        type: choice
+        options: [random, wall, bricks, bollards, head_on]
+        default: random
+      runs:
+        description: "Number of crashes (the last one is the twist)"
+        type: choice
+        options: ["4", "5", "6", "7", "8"]
+        default: "6"
+      max_speed_kmh:
+        description: "Top speed in km/h"
+        type: string
+        default: "200"
+      quality:
+        description: "final = 1080x1920 (slow, best) / draft = fast preview"
+        type: choice
+        options: [final, draft]
+        default: final
+      seed:
+        description: "Leave empty for a new random video (same number = same video)"
+        type: string
+        default: ""
+      save_to_repo:
+        description: "Also save the video in videos/crash"
+        type: boolean
+        default: true
+  push:
+    paths:
+      - "crash_agent/request.txt"
+
+env:
+  SCENARIO: ${{ github.event.inputs.scenario || 'random' }}
+  RUNS: ${{ github.event.inputs.runs || '6' }}
+  MAX_KMH: ${{ github.event.inputs.max_speed_kmh || '200' }}
+  QUALITY: ${{ github.event.inputs.quality || 'final' }}
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      seed: ${{ steps.p.outputs.seed }}
+      indices: ${{ steps.p.outputs.indices }}
+    steps:
+      - id: p
+        run: |
+          SEED="${{ github.event.inputs.seed }}"
+          if [ -z "$SEED" ]; then SEED=$(( (RANDOM << 15 | RANDOM) % 900000 + 100000 )); fi
+          IDX=$(python3 -c "import json;print(json.dumps(list(range($RUNS))))")
+          echo "seed=$SEED" >> "$GITHUB_OUTPUT"
+          echo "indices=$IDX" >> "$GITHUB_OUTPUT"
+          echo "Seed: $SEED  Runs: $RUNS"
+
+  render:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: true
+      matrix:
+        index: ${{ fromJSON(needs.plan.outputs.indices) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: crash_agent
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Blender (bpy), ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg libxrender1 libxi6 libxkbcommon0 libsm6 libxxf86vm1 libxfixes3 libgl1 libegl1 > /dev/null
+          pip install --quiet bpy==5.3.0 numpy pillow
+      - name: Render run ${{ matrix.index }}
+        run: |
+          python crash_agent/render_run.py --index ${{ matrix.index }} \
+            --scenario "$SCENARIO" --runs "$RUNS" \
+            --max-kmh "$MAX_KMH" --seed "${{ needs.plan.outputs.seed }}" \
+            --quality "$QUALITY" --out build 2>&1 | grep -vE "Fra:|Saved:|CUEW" || true
+          test -f build/segments/seg_${{ matrix.index }}.mp4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seg-${{ matrix.index }}
+          path: build/segments/
+          retention-days: 2
+
+  finish:
+    needs: [plan, render]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg > /dev/null
+          pip install --quiet numpy pillow
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: seg-*
+          merge-multiple: true
+          path: build/segments
+      - name: Join runs, add sound, logo and end card
+        run: |
+          python crash_agent/finish_video.py --scenario "$SCENARIO" \
+            --runs "$RUNS" --max-kmh "$MAX_KMH" \
+            --seed "${{ needs.plan.outputs.seed }}" --out build | tee finish.log
+          ls -la build/final
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bipnik-video-${{ needs.plan.outputs.seed }}
+          path: build/final/
+          retention-days: 14
+      - name: Save to videos/crash
+        if: ${{ github.event_name == 'push' || github.event.inputs.save_to_repo == 'true' }}
+        run: |
+          mkdir -p videos/crash
+          cp build/final/* videos/crash/
+          git config user.name "bipnik-bot"
+          git config user.email "bipnik-bot@users.noreply.github.com"
+          git add videos/crash
+          git commit -m "New crash video (seed ${{ needs.plan.outputs.seed }})"
+          git pull --rebase
+          git push
+      - name: Summary
+        run: |
+          TITLE=$(grep '^TITLE:' finish.log | sed 's/^TITLE: //')
+          {
+            echo "## ✅ ویڈیو تیار ہے"
+            echo ""
+            echo "**Title:** $TITLE"
+            echo ""
+            echo "نیچے **Artifacts** میں **Bipnik-video-${{ needs.plan.outputs.seed }}** پر کلک کر کے ڈاؤن لوڈ کریں۔"
+            echo "ویڈیو دیکھیں، پھر caption.txt والا ٹائٹل اور تفصیل Metricool میں ڈال کر پوسٹ کریں۔"
+          } >> "$GITHUB_STEP_SUMMARY"
